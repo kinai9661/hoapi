@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import InferenceClient
 import os
@@ -7,10 +7,9 @@ import requests
 import time
 import io
 
-# 初始化 FastAPI
 app = FastAPI(title="Leapcell AI Station")
 
-# 允許跨域 (CORS)
+# 允許跨域
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,22 +17,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 設定 ---
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# 文字模型 (Chat) - 繼續使用 InferenceClient
+# 文字模型
 TEXT_MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
+text_client = InferenceClient(token=HF_TOKEN)
 
-# 圖片模型 (Image) - 使用直接 API 網址以避免 402 付費錯誤
-# 推薦免費模型:
-# 1. stabilityai/stable-diffusion-3.5-large (畫質好，通常免費)
-# 2. stabilityai/stable-diffusion-2-1 (穩定)
-# 3. runwayml/stable-diffusion-v1-5 (最穩定的免費老牌模型)
-IMAGE_MODEL_ID = "stabilityai/stable-diffusion-3.5-large"
-IMAGE_API_URL = f"https://api-inference.huggingface.co/models/{IMAGE_MODEL_ID}"
+# --- 圖片模型清單 (精心挑選版) ---
+MODEL_MAP = {
+    # [通用/穩定]
+    "v1-5": "runwayml/stable-diffusion-v1-5",       # 最穩定，兼容性最好
+    "dreamshaper": "Lykon/dreamshaper-8",           # 高品質，畫風細膩
 
-# 初始化文字客戶端
-client = InferenceClient(token=HF_TOKEN)
+    # [動漫/無審查] (NSFW Friendly)
+    "anything-v5": "stablediffusionapi/anything-v5", # 動漫霸主，審查極寬鬆
+    
+    # [藝術/風格化] (NSFW Friendly)
+    "openjourney": "prompthero/openjourney",         # Midjourney v4 風格，對人體描繪寬鬆
+    
+    # [次世代] (需授權/易失敗)
+    "sd3.5": "stabilityai/stable-diffusion-3.5-large",
+    "sd3.5-turbo": "stabilityai/stable-diffusion-3.5-large-turbo",
+
+    # [實驗性] (極高失敗率)
+    "flux-nsfw": "Heartsync/Flux-NSFW-uncensored"    # 經常 503 或 403
+}
+
+DEFAULT_MODEL = MODEL_MAP["v1-5"]
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
@@ -41,56 +51,147 @@ def read_root():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Leapcell AI Station</title>
+        <title>Leapcell AI Gen</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f0f2f5; }
-            .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            input, button { padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; }
-            button { background: #007bff; color: white; border: none; cursor: pointer; border-radius: 5px; }
-            button:hover { background: #0056b3; }
-            #result-img { max-width: 100%; margin-top: 10px; border-radius: 5px; display: none; }
-            .loading { color: #666; font-style: italic; display: none; }
-            .status { font-size: 0.8em; color: #888; margin-top: 5px; }
+            body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #1a1a1a; color: #eee; }
+            .container { background: #2d2d2d; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+            h1 { color: #fff; margin-bottom: 5px; }
+            .subtitle { color: #aaa; margin-bottom: 25px; }
+            
+            /* Controls */
+            .controls { display: flex; flex-direction: column; gap: 15px; margin-bottom: 20px; }
+            .row { display: flex; gap: 10px; flex-wrap: wrap; }
+            
+            select, input { padding: 12px; border: 1px solid #444; border-radius: 8px; font-size: 16px; background: #3d3d3d; color: white; }
+            select { flex: 1; min-width: 200px; cursor: pointer; }
+            input { flex: 2; min-width: 200px; }
+            
+            button { padding: 12px 24px; background: #e91e63; color: white; border: none; cursor: pointer; border-radius: 8px; font-weight: bold; transition: 0.2s; font-size: 16px; min-width: 100px; }
+            button:hover { background: #c2185b; }
+            
+            /* Result Area */
+            #result-container { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px dashed #444; border-radius: 8px; margin-top: 20px; background: #222; overflow: hidden; }
+            #result-img { max-width: 100%; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+            .loading { color: #888; font-style: italic; display: none; }
+            
+            /* API Panel */
+            .api-panel { margin-top: 40px; background: #000; color: #00ff9d; padding: 20px; border-radius: 8px; font-family: 'Consolas', monospace; font-size: 13px; border: 1px solid #333; position: relative; }
+            .api-panel h3 { color: #fff; border-bottom: 1px solid #333; padding-bottom: 10px; margin-top: 0; }
+            .label { color: #666; display: inline-block; width: 120px; }
+            .copy-btn { position: absolute; top: 15px; right: 15px; background: #333; border: 1px solid #555; color: white; padding: 4px 10px; font-size: 11px; cursor: pointer; border-radius: 4px; }
+            
+            optgroup { color: #ccc; background: #222; font-style: normal; font-weight: bold; }
+            option { color: #fff; background: #333; padding: 5px; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🎨 AI 圖片生成 (Direct API)</h1>
-            <p class="status">Model: stabilityai/stable-diffusion-3.5-large</p>
+            <h1>🎨 Leapcell AI Generator</h1>
+            <p class="subtitle">Multi-Model Image Generation API</p>
             
-            <input type="text" id="prompt" placeholder="輸入提示詞 (例如: Cyberpunk city, neon lights)" value="A futuristic city with flying cars, high quality, 8k">
-            <button onclick="generateImage()">生成圖片 (Generate)</button>
+            <div class="controls">
+                <div class="row">
+                    <select id="model-select" onchange="updateApiInfo()">
+                        <optgroup label="✨ 推薦 (Recommended)">
+                            <option value="v1-5">Stable Diffusion v1.5 (最穩定)</option>
+                            <option value="dreamshaper">DreamShaper 8 (高品質)</option>
+                        </optgroup>
+                        <optgroup label="🔞 動漫/寬鬆 (Uncensored-ish)">
+                            <option value="anything-v5">Anything v5 (動漫/無審查)</option>
+                            <option value="openjourney">OpenJourney (藝術/寬鬆)</option>
+                        </optgroup>
+                        <optgroup label="🚀 次世代 (New Gen)">
+                            <option value="sd3.5">SD 3.5 Large (需授權)</option>
+                            <option value="sd3.5-turbo">SD 3.5 Turbo (快)</option>
+                        </optgroup>
+                        <optgroup label="🧪 實驗性 (Experimental)">
+                            <option value="flux-nsfw">Flux NSFW (易失敗)</option>
+                        </optgroup>
+                    </select>
+                </div>
+                <div class="row">
+                    <input type="text" id="prompt" placeholder="Enter prompt..." value="1girl, masterpiece, best quality, cyberpunk city background">
+                    <button onclick="generateImage()">Generate</button>
+                </div>
+            </div>
             
-            <p id="loading" class="loading">正在請求 HF 免費 API... 若模型休眠中可能需要 20-30 秒喚醒。</p>
-            <p id="error" style="color: red; display: none;"></p>
-            <img id="result-img" alt="Generated Image" />
+            <div id="result-container">
+                <p id="placeholder" style="color: #555;">Image will appear here</p>
+                <p id="loading" class="loading">⚡ Processing... (Waiting for GPU)</p>
+                <p id="error" style="color: #ff5252; display: none; padding: 20px; text-align: center;"></p>
+                <img id="result-img" alt="Generated Image" />
+            </div>
+
+            <!-- API Panel -->
+            <div class="api-panel">
+                <h3>🔌 API Integration</h3>
+                <button class="copy-btn" onclick="copyApiUrl()">Copy URL</button>
+                
+                <div><span class="label">Endpoint:</span><span id="api-full-url">Loading...</span></div>
+                <div><span class="label">Model ID:</span><span id="current-model-id">...</span></div>
+                
+                <div style="margin-top: 15px; border-top: 1px dashed #333; padding-top: 10px;">
+                    <span class="label" style="display:block; margin-bottom:5px;">Python Example:</span>
+                    <code id="code-example" style="white-space: pre-wrap; color: #a5d6ff;">Loading...</code>
+                </div>
+            </div>
         </div>
 
         <script>
+            const MODEL_IDS = {
+                "v1-5": "runwayml/stable-diffusion-v1-5",
+                "dreamshaper": "Lykon/dreamshaper-8",
+                "anything-v5": "stablediffusionapi/anything-v5",
+                "openjourney": "prompthero/openjourney",
+                "sd3.5": "stabilityai/stable-diffusion-3.5-large",
+                "sd3.5-turbo": "stabilityai/stable-diffusion-3.5-large-turbo",
+                "flux-nsfw": "Heartsync/Flux-NSFW-uncensored"
+            };
+
+            window.onload = updateApiInfo;
+
+            function updateApiInfo() {
+                const modelKey = document.getElementById('model-select').value;
+                const host = window.location.origin;
+                const fullUrl = `${host}/api/generate-image`;
+                
+                document.getElementById('api-full-url').innerText = fullUrl;
+                document.getElementById('current-model-id').innerText = MODEL_IDS[modelKey];
+                
+                const code = `import requests\n\nresponse = requests.get(\n    "${fullUrl}",\n    params={"prompt": "1girl, cat ears", "model": "${modelKey}"}\n)\n\nwith open("out.png", "wb") as f:\n    f.write(response.content)`;
+                document.getElementById('code-example').innerText = code;
+            }
+
+            function copyApiUrl() {
+                navigator.clipboard.writeText(document.getElementById('api-full-url').innerText);
+                alert("URL Copied!");
+            }
+
             async function generateImage() {
                 const prompt = document.getElementById('prompt').value;
+                const modelKey = document.getElementById('model-select').value;
                 const img = document.getElementById('result-img');
                 const loading = document.getElementById('loading');
                 const error = document.getElementById('error');
+                const placeholder = document.getElementById('placeholder');
                 
-                if(!prompt) return alert("請輸入提示詞");
+                if(!prompt) return alert("Please enter a prompt");
 
                 img.style.display = 'none';
+                placeholder.style.display = 'none';
                 error.style.display = 'none';
                 loading.style.display = 'block';
 
                 try {
-                    const response = await fetch(`/api/generate-image?prompt=${encodeURIComponent(prompt)}`);
-                    if (!response.ok) {
-                        const errText = await response.text();
-                        throw new Error(errText);
-                    }
+                    const response = await fetch(`/api/generate-image?model=${modelKey}&prompt=${encodeURIComponent(prompt)}`);
+                    if (!response.ok) throw new Error(await response.text());
+                    
                     const blob = await response.blob();
                     img.src = URL.createObjectURL(blob);
                     img.style.display = 'block';
                 } catch (e) {
-                    error.innerText = "錯誤: " + e.message;
+                    error.innerText = "Error: " + e.message;
                     error.style.display = 'block';
                 } finally {
                     loading.style.display = 'none';
@@ -101,46 +202,66 @@ def read_root():
     </html>
     """
 
+@app.get("/api/info")
+async def get_api_info():
+    has_token = bool(HF_TOKEN)
+    return JSONResponse({
+        "status": "online",
+        "models": list(MODEL_MAP.keys()),
+        "token_set": has_token
+    })
+
 @app.get("/api/generate-image")
-async def generate_image(prompt: str):
+async def generate_image(prompt: str, model: str = "v1-5"):
     if not HF_TOKEN:
         raise HTTPException(status_code=500, detail="Server Error: Missing HF Token")
 
+    target_model_id = MODEL_MAP.get(model, DEFAULT_MODEL)
+    api_url = f"https://router.huggingface.co/hf-inference/models/{target_model_id}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     payload = {"inputs": prompt}
 
-    # 重試邏輯：處理模型載入 (503)
-    max_retries = 5
-    for attempt in range(max_retries):
+    print(f"Generating: {model} ({target_model_id})")
+
+    # Retry Logic
+    for attempt in range(3):
         try:
-            response = requests.post(IMAGE_API_URL, headers=headers, json=payload)
+            response = requests.post(api_url, headers=headers, json=payload, timeout=50)
             
             if response.status_code == 200:
-                # 成功，直接回傳圖片
                 return Response(content=response.content, media_type="image/png")
             
             elif response.status_code == 503:
-                # 模型正在載入中 (Model Loading)
-                error_data = response.json()
-                estimated_time = error_data.get("estimated_time", 10)
-                print(f"Model loading, waiting {estimated_time}s... (Attempt {attempt+1}/{max_retries})")
-                time.sleep(min(estimated_time, 10)) # 最多等 10 秒再試
-                continue # 重試
+                # Cold start
+                time.sleep(6)
+                continue
             
-            else:
-                # 其他錯誤 (如 402, 400 等)
-                raise HTTPException(status_code=response.status_code, detail=f"HF API Error: {response.text}")
+            # Error handling & Fallback
+            elif response.status_code in [400, 401, 402, 403, 404]:
+                if target_model_id != DEFAULT_MODEL:
+                    print(f"Model {model} failed. Fallback to v1-5.")
+                    fallback_url = f"https://router.huggingface.co/hf-inference/models/{DEFAULT_MODEL}"
+                    fallback_resp = requests.post(fallback_url, headers=headers, json=payload, timeout=50)
+                    if fallback_resp.status_code == 200:
+                        return Response(content=fallback_resp.content, media_type="image/png")
+            
+            # If not handled above, raise error
+            if attempt == 2:
+                raise HTTPException(status_code=response.status_code, detail=f"HF Error: {response.text}")
 
-        except requests.exceptions.RequestException as e:
-            raise HTTPException(status_code=500, detail=f"Request failed: {str(e)}")
+        except Exception as e:
+            if attempt == 2:
+                raise HTTPException(status_code=500, detail=str(e))
+            time.sleep(2)
 
-    raise HTTPException(status_code=503, detail="Model is too busy or taking too long to load. Please try again later.")
+    raise HTTPException(status_code=503, detail="Service busy, please try again.")
 
+# Text Chat API
 @app.post("/api/chat")
 async def generate_chat(prompt: str):
     try:
         messages = [{"role": "user", "content": prompt}]
-        response = client.chat_completion(messages=messages, model=TEXT_MODEL_ID, max_tokens=500)
+        response = text_client.chat_completion(messages=messages, model=TEXT_MODEL_ID, max_tokens=500)
         return {"result": response.choices[0].message.content}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
