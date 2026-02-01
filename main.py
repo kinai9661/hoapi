@@ -51,7 +51,7 @@ def read_root():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Leapcell AI Gen (Stable)</title>
+        <title>Leapcell AI Gen (Router Fix)</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #1a1a1a; color: #eee; }
@@ -218,65 +218,55 @@ async def generate_image(prompt: str, model: str = "v1-5"):
 
     target_model_id = MODEL_MAP.get(model, DEFAULT_MODEL)
     
-    # 定義兩個 Endpoint: 新版 Router 和 舊版 Inference API
-    # 這是解決 404 的關鍵：如果不支援 router，會自動嘗試 api-inference
-    endpoints = [
-        f"https://router.huggingface.co/hf-inference/models/{target_model_id}",
-        f"https://api-inference.huggingface.co/models/{target_model_id}"
-    ]
+    # 使用唯一的合法 Router URL
+    api_url = f"https://router.huggingface.co/hf-inference/models/{target_model_id}"
     
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     payload = {"inputs": prompt}
 
-    print(f"Requesting: {model} ({target_model_id})")
+    print(f"Requesting: {model} ({target_model_id}) via Router")
 
     # 重試邏輯
     for attempt in range(3):
         try:
-            # 內層循環：嘗試所有可能的 Endpoint
-            endpoint_success = False
-            last_endpoint_error = None
+            response = requests.post(api_url, headers=headers, json=payload, timeout=50)
             
-            for url in endpoints:
-                print(f"Trying Endpoint: {url}")
-                response = requests.post(url, headers=headers, json=payload, timeout=50)
+            if response.status_code == 200:
+                return Response(content=response.content, media_type="image/png")
+            
+            elif response.status_code == 503:
+                # Cold start (模型載入中)
+                print("Model loading (503)... waiting")
+                time.sleep(8)
+                continue 
+            
+            # 處理各種失敗情況 (404 Not Found, 402 Payment, 410 Gone, 400 Bad Request)
+            elif response.status_code in [404, 402, 400, 410, 401, 403]:
+                print(f"Model {model} failed with {response.status_code}. Msg: {response.text[:100]}")
                 
-                if response.status_code == 200:
-                    return Response(content=response.content, media_type="image/png")
-                
-                elif response.status_code == 503:
-                    # Cold start (模型載入中) - 等待並重試整個流程
-                    print("Model loading (503)...")
-                    break # 跳出 Endpoint 循環，進入下一次 Attempt
-                
-                elif response.status_code == 404:
-                    # 404 Not Found - 嘗試下一個 Endpoint
-                    print(f"Endpoint {url} not found (404)")
-                    last_endpoint_error = "404 Not Found"
-                    continue
-                
-                else:
-                    # 其他錯誤 (400/401/402) - 可能是模型問題
-                    last_endpoint_error = f"Error {response.status_code}: {response.text}"
-                    break # 停止嘗試其他 Endpoint，準備 Fallback
+                # 如果這不是 v1-5，嘗試切換到 v1-5
+                if target_model_id != DEFAULT_MODEL:
+                    print("Falling back to v1-5...")
+                    fallback_url = f"https://router.huggingface.co/hf-inference/models/{DEFAULT_MODEL}"
+                    fallback_resp = requests.post(fallback_url, headers=headers, json=payload, timeout=50)
+                    
+                    if fallback_resp.status_code == 200:
+                        return Response(content=fallback_resp.content, media_type="image/png")
+                    else:
+                        print(f"Fallback v1-5 failed: {fallback_resp.status_code}")
+                        
+                        # 絕境求生: 嘗試 SD 2.1
+                        if fallback_resp.status_code in [404, 410, 400]:
+                             print("Trying final fallback: SD 2.1")
+                             fallback_url_2 = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-2-1"
+                             fallback_resp_2 = requests.post(fallback_url_2, headers=headers, json=payload, timeout=50)
+                             if fallback_resp_2.status_code == 200:
+                                 return Response(content=fallback_resp_2.content, media_type="image/png")
 
-            # 如果到了這裡還沒 Return，說明當前模型的所有 Endpoint 都失敗了
-            # 檢查是否需要 Fallback 到 v1-5
-            if target_model_id != DEFAULT_MODEL:
-                print(f"Primary model {model} failed. Fallback to v1-5.")
-                fallback_url = f"https://api-inference.huggingface.co/models/{DEFAULT_MODEL}"
-                fallback_resp = requests.post(fallback_url, headers=headers, json=payload, timeout=50)
-                
-                if fallback_resp.status_code == 200:
-                    return Response(content=fallback_resp.content, media_type="image/png")
-                else:
-                    print(f"Fallback failed: {fallback_resp.status_code}")
-
-            # 如果 Fallback 也失敗，或者沒有觸發 Fallback
+            # 如果沒有成功 return，且沒有觸發 fallback 或 fallback 失敗
             if attempt == 2:
-                 raise HTTPException(status_code=404, detail=f"HF Error: {last_endpoint_error}")
-                 
-            time.sleep(5) # 重試前等待
+                # 拋出最後一次的錯誤訊息
+                raise HTTPException(status_code=response.status_code, detail=f"HF Error: {response.text}")
 
         except Exception as e:
             print(f"Exception: {str(e)}")
@@ -284,7 +274,7 @@ async def generate_image(prompt: str, model: str = "v1-5"):
                 raise HTTPException(status_code=500, detail=str(e))
             time.sleep(2)
 
-    raise HTTPException(status_code=503, detail="Service busy or model not found.")
+    raise HTTPException(status_code=503, detail="Service busy or model unavailable.")
 
 # Text Chat API
 @app.post("/api/chat")
