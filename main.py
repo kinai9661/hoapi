@@ -1,16 +1,4 @@
-import os
-
-print("正在生成專案檔案...")
-
-# 1. 定義 requirements.txt 內容
-requirements_content = """fastapi
-uvicorn
-huggingface_hub
-python-dotenv
-requests"""
-
-# 2. 定義 main.py 內容 (修復版: 使用 requests 繞過付費牆)
-main_content = r'''from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import InferenceClient
@@ -33,11 +21,14 @@ app.add_middleware(
 # --- 設定 ---
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# 文字模型 (Chat)
+# 文字模型 (Chat) - 繼續使用 InferenceClient
 TEXT_MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
 
-# 圖片模型 (Direct API)
-# 使用 requests 直接調用 API 可避免被路由到付費節點 (如 fal-ai)
+# 圖片模型 (Image) - 使用直接 API 網址以避免 402 付費錯誤
+# 推薦免費模型:
+# 1. stabilityai/stable-diffusion-3.5-large (畫質好，通常免費)
+# 2. stabilityai/stable-diffusion-2-1 (穩定)
+# 3. runwayml/stable-diffusion-v1-5 (最穩定的免費老牌模型)
 IMAGE_MODEL_ID = "stabilityai/stable-diffusion-3.5-large"
 IMAGE_API_URL = f"https://api-inference.huggingface.co/models/{IMAGE_MODEL_ID}"
 
@@ -65,13 +56,13 @@ def read_root():
     </head>
     <body>
         <div class="container">
-            <h1>🎨 AI 圖片生成 (Fix 402 Error)</h1>
+            <h1>🎨 AI 圖片生成 (Direct API)</h1>
             <p class="status">Model: stabilityai/stable-diffusion-3.5-large</p>
             
             <input type="text" id="prompt" placeholder="輸入提示詞 (例如: Cyberpunk city, neon lights)" value="A futuristic city with flying cars, high quality, 8k">
             <button onclick="generateImage()">生成圖片 (Generate)</button>
             
-            <p id="loading" class="loading">正在請求 HF 免費 API... (首次啟動可能需 30 秒)</p>
+            <p id="loading" class="loading">正在請求 HF 免費 API... 若模型休眠中可能需要 20-30 秒喚醒。</p>
             <p id="error" style="color: red; display: none;"></p>
             <img id="result-img" alt="Generated Image" />
         </div>
@@ -122,24 +113,22 @@ async def generate_image(prompt: str):
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            print(f"Requesting HF API (Attempt {attempt+1})...")
             response = requests.post(IMAGE_API_URL, headers=headers, json=payload)
             
             if response.status_code == 200:
-                # 成功
+                # 成功，直接回傳圖片
                 return Response(content=response.content, media_type="image/png")
             
             elif response.status_code == 503:
-                # 模型載入中
+                # 模型正在載入中 (Model Loading)
                 error_data = response.json()
                 estimated_time = error_data.get("estimated_time", 10)
-                print(f"Model loading, waiting {estimated_time}s...")
-                time.sleep(min(estimated_time, 10))
-                continue
+                print(f"Model loading, waiting {estimated_time}s... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(min(estimated_time, 10)) # 最多等 10 秒再試
+                continue # 重試
             
             else:
-                # 其他錯誤
-                print(f"Error: {response.text}")
+                # 其他錯誤 (如 402, 400 等)
                 raise HTTPException(status_code=response.status_code, detail=f"HF API Error: {response.text}")
 
         except requests.exceptions.RequestException as e:
@@ -159,18 +148,3 @@ async def generate_chat(prompt: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
-'''
-
-# 3. 寫入檔案
-with open("requirements.txt", "w", encoding="utf-8") as f:
-    f.write(requirements_content)
-    print("✅ 已建立 requirements.txt")
-
-with open("main.py", "w", encoding="utf-8") as f:
-    f.write(main_content)
-    print("✅ 已建立 main.py")
-
-print("\n檔案建立完成！請執行以下命令推送：")
-print("git add main.py requirements.txt")
-print("git commit -m 'Fix 402 payment error'")
-print("git push")
