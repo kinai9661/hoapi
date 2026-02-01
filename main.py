@@ -21,9 +21,9 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 # 文字模型 (Chat)
 TEXT_MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
-# 圖片模型 (Image) - FLUX.1-schnell 速度快且質量高，適合免費版
-IMAGE_MODEL_ID = "black-forest-labs/FLUX.1-schnell"
-# 備用圖片模型: "stabilityai/stable-diffusion-3.5-large"
+# 圖片模型 (Image) - SD3.5 速度快且質量高，適合免費版
+IMAGE_MODEL_ID = "stabilityai/stable-diffusion-3.5-large"
+# 備用圖片模型: ""
 
 # 初始化客戶端
 client = InferenceClient(token=HF_TOKEN)
